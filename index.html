@@ -4711,7 +4711,7 @@ BON_STAGES("africa", [
     $("sc-goals").innerHTML = st.goals.map(function(g) {
       return '<div class="gline">' + goalIcon(g, st) + "<span>" + goalLabel(g, st) + "</span></div>";
     }).join("");
-    $("sc-moves").textContent = st.moves;
+    $("sc-moves").textContent = Math.max(5, st.moves - hardCut(st));
     $("sc-hi").textContent = Save.data.hi[st.id] || 0;
     openModal("modal-stage");
   }
@@ -5132,6 +5132,10 @@ BON_STAGES("africa", [
     b.innerHTML = "\u304D\u3087\u3046\u306E\u30C1\u30E3\u30EC\u30F3\u30B8<em>" + (done ? "\u2713 \u30AF\u30EA\u30A2\u6E08\u307F \u30FB \u30D9\u30B9\u30C8 " + r.best : "\u307E\u3060 \u3060\u3088\uFF01 \u3054\u307B\u3046\u3073\u3042\u308A") + (streak ? " \u30FB " + streak + "\u65E5\u308C\u3093\u305E\u304F" : "") + "</em>";
     b.classList.toggle("done", done);
   }
+  function hardCut(st) {
+    var lv = st.level || 0;
+    return lv >= 19 || bossKind(st) ? 2 : lv >= 9 ? 1 : 0;
+  }
   function startStage(i) {
     token++;
     var st = CFG.stages[i];
@@ -5140,7 +5144,10 @@ BON_STAGES("africa", [
     G.idx = i;
     G.stage = st;
     G.cont = false;
-    G.moves = st.moves;
+    G.moves = Math.max(5, st.moves - hardCut(st));
+    var fl = (Save.data.fails || {})[st.id] || 0;
+    G.assist = !G.daily && fl >= 3;
+    if (G.assist) G.moves += 3;
     G.score = 0;
     G.shown = 0;
     G.maxChain = 0;
@@ -5179,6 +5186,9 @@ BON_STAGES("africa", [
       }
     }
     updateItemBar();
+    if (G.assist) setTimeout(function() {
+      toast("gtoast", "3\u304B\u3044 \u307E\u3051\u305F\u304B\u3089\u3001\u624B\u6570 +3 \u306E \u304A\u305F\u3059\u3051\uFF01", 3600);
+    }, 600);
     G.prog = freshProg(G.engine);
     clearBoardDom();
     renderGoals();
@@ -6259,6 +6269,78 @@ BON_STAGES("africa", [
       console.warn("[icon]", e);
     }
   }
+  var SAVE_KEY = "bonpuzzle.save.v2";
+  function idbOpen() {
+    return new Promise(function(ok, ng) {
+      try {
+        var r = indexedDB.open("bonpuzzle", 1);
+        r.onupgradeneeded = function() {
+          r.result.createObjectStore("kv");
+        };
+        r.onsuccess = function() {
+          ok(r.result);
+        };
+        r.onerror = function() {
+          ng(r.error);
+        };
+      } catch (e) {
+        ng(e);
+      }
+    });
+  }
+  function idbPut(v) {
+    idbOpen().then(function(db) {
+      db.transaction("kv", "readwrite").objectStore("kv").put(v, "save");
+    }).catch(function() {
+    });
+  }
+  function idbGet() {
+    return idbOpen().then(function(db) {
+      return new Promise(function(ok) {
+        var q = db.transaction("kv").objectStore("kv").get("save");
+        q.onsuccess = function() {
+          ok(q.result);
+        };
+        q.onerror = function() {
+          ok(null);
+        };
+      });
+    }).catch(function() {
+      return null;
+    });
+  }
+  function setupBackup() {
+    try {
+      if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
+    } catch (e) {
+    }
+    var raw = null;
+    try {
+      raw = localStorage.getItem(SAVE_KEY);
+    } catch (e) {
+    }
+    if (!raw) idbGet().then(function(v) {
+      if (v) {
+        try {
+          localStorage.setItem(SAVE_KEY, v);
+          location.reload();
+        } catch (e) {
+        }
+      }
+    });
+    else idbPut(raw);
+    var sv = Save.save;
+    Save.save = function() {
+      var r = sv.apply(Save, arguments);
+      try {
+        idbPut(localStorage.getItem(SAVE_KEY));
+      } catch (e) {
+      }
+      return r;
+    };
+    if ("serviceWorker" in navigator && /^https:/.test(location.protocol)) navigator.serviceWorker.register("sw.js").catch(function() {
+    });
+  }
   function xferEncode() {
     return "BONP1:" + btoa(unescape(encodeURIComponent(JSON.stringify(Save.data))));
   }
@@ -6436,9 +6518,12 @@ BON_STAGES("africa", [
     G.ended = true;
     clearHint();
     var st = G.stage, d = Save.data, i = G.idx, newHi = G.score > (d.hi[st.id] || 0);
-    if (!G.daily) d.cleared[st.id] = true;
+    if (!G.daily) {
+      d.cleared[st.id] = true;
+      if (d.fails) delete d.fails[st.id];
+    }
     Quest.add("win");
-    var left = G.moves / Math.max(1, st.moves), stars = left >= 0.4 ? 3 : left >= 0.2 ? 2 : 1;
+    var left = G.moves / Math.max(1, Math.max(5, st.moves - hardCut(st)) + (G.assist ? 3 : 0)), stars = left >= 0.4 ? 3 : left >= 0.2 ? 2 : 1;
     d.stars = d.stars || {};
     var oldStars = d.stars[st.id] || 0;
     if (stars > oldStars && !G.daily) d.stars[st.id] = stars;
@@ -6516,6 +6601,12 @@ BON_STAGES("africa", [
   async function fail() {
     G.ended = true;
     clearHint();
+    if (!G.daily) {
+      var dd = Save.data;
+      dd.fails = dd.fails || {};
+      dd.fails[G.stage.id] = (dd.fails[G.stage.id] || 0) + 1;
+      Save.save();
+    }
     Snd.play("fail");
     var my = token;
     await sleep(700);
@@ -6586,6 +6677,7 @@ BON_STAGES("africa", [
     Snd.bgm.onError = function(msg) {
       toast("gtoast", msg, 4200);
     };
+    setupBackup();
     applyAppIcon();
     setupXfer();
     applySettings();
